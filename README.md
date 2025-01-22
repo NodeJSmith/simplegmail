@@ -1,3 +1,5 @@
+# NOTE - If confused or unsure, create a `Desktop` OAuth credential
+
 # simplegmail
 [![PyPI Downloads](https://img.shields.io/pypi/dm/simplegmail.svg?label=PyPI%20downloads)](
 https://pypi.org/project/simplegmail/)
