@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import setuptools
 
 setuptools.setup(
@@ -7,23 +9,24 @@ setuptools.setup(
     author="Jeremy Ephron",
     author_email="jeremye@cs.stanford.edu",
     description="A simple Python API client for Gmail.",
-    long_description=open('README.md').read(),
-    long_description_content_type='text/markdown',
+    long_description=Path("README.md").read_text(),
+    long_description_content_type="text/markdown",
     packages=setuptools.find_packages(),
+    python_requires=">=3.9",
     install_requires=[
-        'google-api-python-client>=1.7.3',
-        'beautifulsoup4>=4.0.0',
-        'python-dateutil>=2.8.1',
-        'oauth2client>=4.1.3',
-        'lxml>=4.4.2'
+        "google-api-python-client>=1.7.3",
+        "beautifulsoup4>=4.0.0",
+        "python-dateutil>=2.8.1",
+        "oauth2client>=4.1.3",
+        "lxml>=4.4.2",
     ],
     setup_requires=["pytest-runner"],
     tests_require=["pytest"],
     classifiers=[
-        'Development Status :: 5 - Production/Stable',
-        'Programming Language :: Python',
-        'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
+        "Development Status :: 5 - Production/Stable",
+        "Programming Language :: Python",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.9",
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],

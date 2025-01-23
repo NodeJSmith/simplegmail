@@ -7,35 +7,48 @@ attachments) and retrieving mail with the full suite of Gmail search options.
 """
 
 import base64
-from email.mime.audio       import MIMEAudio
-from email.mime.application import MIMEApplication
-from email.mime.base        import MIMEBase
-from email.mime.image       import MIMEImage
-from email.mime.multipart   import MIMEMultipart
-from email.mime.text        import MIMEText
+import functools
 import html
 import math
 import mimetypes
-import os
+import operator
 import re
 import threading
-from typing import List, Optional
+import typing
+from email.mime.application import MIMEApplication
+from email.mime.audio import MIMEAudio
+from email.mime.base import MIMEBase
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from pathlib import Path
+from typing import ClassVar, Optional
 
-from bs4 import BeautifulSoup
 import dateutil.parser as parser
+from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
 from httplib2 import Http
 from oauth2client import client, file, tools
-from oauth2client.clientsecrets import InvalidClientSecretsError
 
 from simplegmail import label
 from simplegmail.attachment import Attachment
 from simplegmail.label import Label
 from simplegmail.message import Message
 
+if typing.TYPE_CHECKING:
+    from googleapiclient._apis.gmail.v1 import GmailResource  # type: ignore
 
-class Gmail(object):
+
+CLIENT_SECRET_FILE_NOT_FOUND_MSG = (
+    "Your 'client_secret.json' file is nonexistent. Make sure "
+    "the file is in the root directory of your application. If "
+    "you don't have a client secrets file, go to https://"
+    "developers.google.com/gmail/api/quickstart/python, and "
+    "follow the instructions listed there."
+)
+
+
+class Gmail:
     """
     The Gmail class which serves as the entrypoint for the Gmail service API.
 
@@ -48,14 +61,14 @@ class Gmail(object):
 
     Attributes:
         client_secret_file (str): The name of the user's client secret file.
-        service (googleapiclient.discovery.Resource): The Gmail service object.
+        service (GmailResource): The Gmail service object.
 
     """
 
     # Allow Gmail to read and write emails, and access settings like aliases.
-    _SCOPES = [
-        'https://www.googleapis.com/auth/gmail.modify',
-        'https://www.googleapis.com/auth/gmail.settings.basic'
+    _SCOPES: ClassVar[list[str]] = [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.settings.basic",
     ]
 
     # If you don't have a client secret file, follow the instructions at:
@@ -64,56 +77,44 @@ class Gmail(object):
 
     def __init__(
         self,
-        client_secret_file: str = 'client_secret.json',
-        creds_file: str = 'gmail_token.json',
-        access_type: str = 'offline',
+        client_secret_file: str = "client_secret.json",
+        creds_file: str = "gmail_token.json",
+        access_type: str = "offline",
         noauth_local_webserver: bool = False,
         _creds: Optional[client.OAuth2Credentials] = None,
     ) -> None:
         self.client_secret_file = client_secret_file
         self.creds_file = creds_file
 
-        try:
-            # The file gmail_token.json stores the user's access and refresh
-            # tokens, and is created automatically when the authorization flow
-            # completes for the first time.
-            if _creds:
-                self.creds = _creds
-            else:
-                store = file.Storage(self.creds_file)
-                self.creds = store.get()
+        # The file gmail_token.json stores the user's access and refresh
+        # tokens, and is created automatically when the authorization flow
+        # completes for the first time.
+        if _creds:
+            self.creds = _creds
+        else:
+            store = file.Storage(self.creds_file)
+            self.creds = store.get()
 
-            if not self.creds or self.creds.invalid:
-                flow = client.flow_from_clientsecrets(
-                    self.client_secret_file, self._SCOPES
-                )
+        if not self.creds or self.creds.invalid:
+            if not Path(self.client_secret_file).exists():
+                raise FileNotFoundError(CLIENT_SECRET_FILE_NOT_FOUND_MSG)
 
-                flow.params['access_type'] = access_type
-                flow.params['prompt'] = 'consent'
+            flow = client.flow_from_clientsecrets(self.client_secret_file, self._SCOPES)
 
-                args = []
-                if noauth_local_webserver:
-                    args.append('--noauth_local_webserver')
+            flow.params["access_type"] = access_type
+            flow.params["prompt"] = "consent"
 
-                flags = tools.argparser.parse_args(args)
-                self.creds = tools.run_flow(flow, store, flags)
+            args = []
+            if noauth_local_webserver:
+                args.append("--noauth_local_webserver")
 
-            self._service = build(
-                'gmail', 'v1', http=self.creds.authorize(Http()),
-                cache_discovery=False
-            )
+            flags = tools.argparser.parse_args(args)
+            self.creds = tools.run_flow(flow, store, flags)
 
-        except InvalidClientSecretsError:
-            raise FileNotFoundError(
-                "Your 'client_secret.json' file is nonexistent. Make sure "
-                "the file is in the root directory of your application. If "
-                "you don't have a client secrets file, go to https://"
-                "developers.google.com/gmail/api/quickstart/python, and "
-                "follow the instructions listed there."
-            )
+        self._service: GmailResource = build("gmail", "v1", http=self.creds.authorize(Http()), cache_discovery=False)
 
     @property
-    def service(self) -> 'googleapiclient.discovery.Resource':
+    def service(self) -> "GmailResource":
         # Since the token is only used through calls to the service object,
         # this ensure that the token is always refreshed before use.
         if self.creds.access_token_expired:
@@ -125,14 +126,14 @@ class Gmail(object):
         self,
         sender: str,
         to: str,
-        subject: str = '',
+        subject: str = "",
         msg_html: Optional[str] = None,
         msg_plain: Optional[str] = None,
-        cc: Optional[List[str]] = None,
-        bcc: Optional[List[str]] = None,
-        attachments: Optional[List[str]] = None,
+        cc: Optional[list[str]] = None,
+        bcc: Optional[list[str]] = None,
+        attachments: Optional[list[str]] = None,
         signature: bool = False,
-        user_id: str = 'me'
+        user_id: str = "me",
     ) -> Message:
         """
         Sends an email.
@@ -163,26 +164,25 @@ class Gmail(object):
         """
 
         msg = self._create_message(
-            sender, to, subject, msg_html, msg_plain, cc=cc, bcc=bcc,
-            attachments=attachments, signature=signature, user_id=user_id
+            sender,
+            to,
+            subject,
+            msg_html,
+            msg_plain,
+            cc=cc,
+            bcc=bcc,
+            attachments=attachments,
+            signature=signature,
+            user_id=user_id,
         )
 
-        try:
-            req = self.service.users().messages().send(userId='me', body=msg)
-            res = req.execute()
-            return self._build_message_from_ref(user_id, res, 'reference')
-
-        except HttpError as error:
-            # Pass along the error
-            raise error
+        req = self.service.users().messages().send(userId="me", body=msg)
+        res = req.execute()
+        return self._build_message_from_ref(user_id, res, "reference")
 
     def get_unread_inbox(
-        self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference'
-    ) -> List[Message]:
+        self, user_id: str = "me", labels: Optional[list[Label]] = None, query: str = "", attachments: str = "reference"
+    ) -> list[Message]:
         """
         Gets unread messages from your inbox.
 
@@ -206,20 +206,19 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.INBOX)
-        return self.get_unread_messages(user_id, labels, query)
+        return self.get_unread_messages(user_id, labels, query, attachments)
 
     def get_starred_messages(
         self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference',
-        include_spam_trash: bool = False
-    ) -> List[Message]:
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachments: str = "reference",
+        include_spam_trash: bool = False,
+    ) -> list[Message]:
         """
         Gets starred messages from your account.
 
@@ -244,21 +243,19 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.STARRED)
-        return self.get_messages(user_id, labels, query, attachments,
-                                 include_spam_trash)
+        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
 
     def get_important_messages(
         self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference',
-        include_spam_trash: bool = False
-    ) -> List[Message]:
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachments: str = "reference",
+        include_spam_trash: bool = False,
+    ) -> list[Message]:
         """
         Gets messages marked important from your account.
 
@@ -283,21 +280,19 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.IMPORTANT)
-        return self.get_messages(user_id, labels, query, attachments,
-                                 include_spam_trash)
+        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
 
     def get_unread_messages(
         self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference',
-        include_spam_trash: bool = False
-    ) -> List[Message]:
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachments: str = "reference",
+        include_spam_trash: bool = False,
+    ) -> list[Message]:
         """
         Gets unread messages from your account.
 
@@ -322,21 +317,19 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.UNREAD)
-        return self.get_messages(user_id, labels, query, attachments,
-                                 include_spam_trash)
+        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
 
     def get_drafts(
         self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference',
-        include_spam_trash: bool = False
-    ) -> List[Message]:
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachments: str = "reference",
+        include_spam_trash: bool = False,
+    ) -> list[Message]:
         """
         Gets drafts saved in your account.
 
@@ -361,21 +354,19 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.DRAFT)
-        return self.get_messages(user_id, labels, query, attachments,
-                                 include_spam_trash)
+        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
 
     def get_sent_messages(
         self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference',
-        include_spam_trash: bool = False
-    ) -> List[Message]:
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachments: str = "reference",
+        include_spam_trash: bool = False,
+    ) -> list[Message]:
         """
         Gets sent messages from your account.
 
@@ -400,21 +391,14 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.SENT)
-        return self.get_messages(user_id, labels, query, attachments,
-                                 include_spam_trash)
+        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
 
     def get_trash_messages(
-        self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference'
-    ) -> List[Message]:
-
+        self, user_id: str = "me", labels: Optional[list[Label]] = None, query: str = "", attachments: str = "reference"
+    ) -> list[Message]:
         """
         Gets messages in your trash from your account.
 
@@ -438,19 +422,14 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.TRASH)
         return self.get_messages(user_id, labels, query, attachments, True)
 
     def get_spam_messages(
-        self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference'
-    ) -> List[Message]:
+        self, user_id: str = "me", labels: Optional[list[Label]] = None, query: str = "", attachments: str = "reference"
+    ) -> list[Message]:
         """
         Gets messages marked as spam from your account.
 
@@ -474,21 +453,19 @@ class Gmail(object):
 
         """
 
-
-        if labels is None:
-            labels = []
+        labels = labels or []
 
         labels.append(label.SPAM)
         return self.get_messages(user_id, labels, query, attachments, True)
 
     def get_messages(
         self,
-        user_id: str = 'me',
-        labels: Optional[List[Label]] = None,
-        query: str = '',
-        attachments: str = 'reference',
-        include_spam_trash: bool = False
-    ) -> List[Message]:
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachments: str = "reference",
+        include_spam_trash: bool = False,
+    ) -> list[Message]:
         """
         Gets messages from your account.
 
@@ -513,45 +490,41 @@ class Gmail(object):
 
         """
 
-        if labels is None:
-            labels = []
+        labels = labels or []
 
-        labels_ids = [
-            lbl.id if isinstance(lbl, Label) else lbl for lbl in labels
-        ]
+        labels_ids = [lbl.id if isinstance(lbl, Label) else lbl for lbl in labels]
 
-        try:
-            response = self.service.users().messages().list(
-                userId=user_id,
-                q=query,
-                labelIds=labels_ids,
-                includeSpamTrash=include_spam_trash
-            ).execute()
+        response = (
+            self.service.users()
+            .messages()
+            .list(userId=user_id, q=query, labelIds=labels_ids, includeSpamTrash=include_spam_trash)
+            .execute()
+        )
 
-            message_refs = []
-            if 'messages' in response:  # ensure request was successful
-                message_refs.extend(response['messages'])
+        message_refs = []
+        if "messages" in response:  # ensure request was successful
+            message_refs.extend(response["messages"])
 
-            while 'nextPageToken' in response:
-                page_token = response['nextPageToken']
-                response = self.service.users().messages().list(
+        while "nextPageToken" in response:
+            page_token = response["nextPageToken"]
+            response = (
+                self.service.users()
+                .messages()
+                .list(
                     userId=user_id,
                     q=query,
                     labelIds=labels_ids,
                     includeSpamTrash=include_spam_trash,
-                    pageToken=page_token
-                ).execute()
+                    pageToken=page_token,
+                )
+                .execute()
+            )
 
-                message_refs.extend(response['messages'])
+            message_refs.extend(response["messages"])
 
-            return self._get_messages_from_refs(user_id, message_refs,
-                                                attachments)
+        return self._get_messages_from_refs(user_id, message_refs, attachments)
 
-        except HttpError as error:
-            # Pass along the error
-            raise error
-
-    def list_labels(self, user_id: str = 'me') -> List[Label]:
+    def list_labels(self, user_id: str = "me") -> list[Label]:
         """
         Retrieves all labels for the specified user.
 
@@ -571,24 +544,12 @@ class Gmail(object):
 
         """
 
-        try:
-            res = self.service.users().labels().list(
-                userId=user_id
-            ).execute()
+        res = self.service.users().labels().list(userId=user_id).execute()
 
-        except HttpError as error:
-            # Pass along the error
-            raise error
+        labels = [Label(name=x["name"], id=x["id"]) for x in res["labels"]]
+        return labels
 
-        else:
-            labels = [Label(name=x['name'], id=x['id']) for x in res['labels']]
-            return labels
-
-    def create_label(
-        self,
-        name: str,
-        user_id: str = 'me'
-    ) -> Label:
+    def create_label(self, name: str, user_id: str = "me") -> Label:
         """
         Creates a new label.
 
@@ -605,30 +566,17 @@ class Gmail(object):
                 HTTP request.
 
         """
+        # TODO: In the future, can add the following fields:
+        # "messageListVisibility"
+        # "labelListVisibility"
+        # "color"
 
-        body = {
-            "name": name,
+        body = {"name": name}
 
-            # TODO: In the future, can add the following fields:
-            # "messageListVisibility"
-            # "labelListVisibility"
-            # "color"
-        }
+        res = self.service.users().labels().create(userId=user_id, body=body).execute()
+        return Label(res["name"], res["id"])
 
-        try:
-            res = self.service.users().labels().create(
-                userId=user_id,
-                body=body
-            ).execute()
-
-        except HttpError as error:
-            # Pass along the error
-            raise error
-
-        else:
-            return Label(res['name'], res['id'])
-
-    def delete_label(self, label: Label, user_id: str = 'me') -> None:
+    def delete_label(self, label: Label, user_id: str = "me") -> None:
         """
         Deletes a label.
 
@@ -643,23 +591,11 @@ class Gmail(object):
 
         """
 
-        try:
-            self.service.users().labels().delete(
-                userId=user_id,
-                id=label.id
-            ).execute()
-
-        except HttpError as error:
-            # Pass along the error
-            raise error
+        self.service.users().labels().delete(userId=user_id, id=label.id).execute()
 
     def _get_messages_from_refs(
-        self,
-        user_id: str,
-        message_refs: List[dict],
-        attachments: str = 'reference',
-        parallel: bool = True
-    ) -> List[Message]:
+        self, user_id: str, message_refs: list[dict], attachments: str = "reference", parallel: bool = True
+    ) -> list[Message]:
         """
         Retrieves the actual messages from a list of references.
 
@@ -689,15 +625,11 @@ class Gmail(object):
             return []
 
         if not parallel:
-            return [self._build_message_from_ref(user_id, ref, attachments)
-                    for ref in message_refs]
+            return [self._build_message_from_ref(user_id, ref, attachments) for ref in message_refs]
 
         max_num_threads = 12  # empirically chosen, prevents throttling
         target_msgs_per_thread = 10  # empirically chosen
-        num_threads = min(
-            math.ceil(len(message_refs) / target_msgs_per_thread),
-            max_num_threads
-        )
+        num_threads = min(math.ceil(len(message_refs) / target_msgs_per_thread), max_num_threads)
         batch_size = math.ceil(len(message_refs) / num_threads)
         message_lists = [None] * num_threads
 
@@ -707,18 +639,12 @@ class Gmail(object):
             start = thread_num * batch_size
             end = min(len(message_refs), (thread_num + 1) * batch_size)
             message_lists[thread_num] = [
-                gmail._build_message_from_ref(
-                    user_id, message_refs[i], attachments
-                )
-                for i in range(start, end)
+                gmail._build_message_from_ref(user_id, message_refs[i], attachments) for i in range(start, end)
             ]
 
             gmail.service.close()
 
-        threads = [
-            threading.Thread(target=thread_download_batch, args=(i,))
-            for i in range(num_threads)
-        ]
+        threads = [threading.Thread(target=thread_download_batch, args=(i,)) for i in range(num_threads)]
 
         for t in threads:
             t.start()
@@ -726,14 +652,9 @@ class Gmail(object):
         for t in threads:
             t.join()
 
-        return sum(message_lists, [])
+        return functools.reduce(operator.iadd, message_lists, [])
 
-    def _build_message_from_ref(
-        self,
-        user_id: str,
-        message_ref: dict,
-        attachments: str = 'reference'
-    ) -> Message:
+    def _build_message_from_ref(self, user_id: str, message_ref: dict, attachments: str = "reference") -> Message:
         """
         Creates a Message object from a reference.
 
@@ -756,106 +677,97 @@ class Gmail(object):
 
         """
 
-        try:
-            # Get message JSON
-            message = self.service.users().messages().get(
-                userId=user_id, id=message_ref['id']
-            ).execute()
+        message = self.service.users().messages().get(userId=user_id, id=message_ref["id"]).execute()
 
-        except HttpError as error:
-            # Pass along the error
-            raise error
+        msg_id = message["id"]
+        thread_id = message["threadId"]
+        label_ids = []
+        if "labelIds" in message:
+            user_labels = {x.id: x for x in self.list_labels(user_id=user_id)}
+            label_ids = [user_labels[x] for x in message["labelIds"]]
+        snippet = html.unescape(message["snippet"])
 
-        else:
-            msg_id = message['id']
-            thread_id = message['threadId']
-            label_ids = []
-            if 'labelIds' in message:
-                user_labels = {x.id: x for x in self.list_labels(user_id=user_id)}
-                label_ids = [user_labels[x] for x in message['labelIds']]
-            snippet = html.unescape(message['snippet'])
+        payload = message["payload"]
+        headers = payload["headers"]
 
-            payload = message['payload']
-            headers = payload['headers']
+        # Get header fields (date, from, to, subject)
+        date = ""
+        sender = ""
+        recipient = ""
+        subject = ""
+        msg_hdrs = {}
+        cc = []
+        bcc = []
+        for hdr in headers:
+            if hdr["name"].lower() == "date":
+                try:
+                    date = str(parser.parse(hdr["value"]).astimezone())
+                except Exception:
+                    date = hdr["value"]
+            elif hdr["name"].lower() == "from":
+                sender = hdr["value"]
+            elif hdr["name"].lower() == "to":
+                recipient = hdr["value"]
+            elif hdr["name"].lower() == "subject":
+                subject = hdr["value"]
+            elif hdr["name"].lower() == "cc":
+                cc = hdr["value"].split(", ")
+            elif hdr["name"].lower() == "bcc":
+                bcc = hdr["value"].split(", ")
 
-            # Get header fields (date, from, to, subject)
-            date = ''
-            sender = ''
-            recipient = ''
-            subject = ''
-            msg_hdrs = {}
-            cc = []
-            bcc = []
-            for hdr in headers:
-                if hdr['name'].lower() == 'date':
-                    try:
-                        date = str(parser.parse(hdr['value']).astimezone())
-                    except Exception:
-                        date = hdr['value']
-                elif hdr['name'].lower() == 'from':
-                    sender = hdr['value']
-                elif hdr['name'].lower() == 'to':
-                    recipient = hdr['value']
-                elif hdr['name'].lower() == 'subject':
-                    subject = hdr['value']
-                elif hdr['name'].lower() == 'cc':
-                    cc = hdr['value'].split(', ')
-                elif hdr['name'].lower() == 'bcc':
-                    bcc = hdr['value'].split(', ')
+            msg_hdrs[hdr["name"]] = hdr["value"]
 
-                msg_hdrs[hdr['name']] = hdr['value']
+        parts = self._evaluate_message_payload(payload, user_id, message_ref["id"], attachments)
 
-            parts = self._evaluate_message_payload(
-                payload, user_id, message_ref['id'], attachments
-            )
+        plain_msg = None
+        html_msg = None
+        attms = []
+        for part in parts:
+            if part["part_type"] == "plain":
+                if plain_msg is None:
+                    plain_msg = part["body"]
+                else:
+                    plain_msg += "\n" + part["body"]
+            elif part["part_type"] == "html":
+                if html_msg is None:
+                    html_msg = part["body"]
+                else:
+                    html_msg += "<br/>" + part["body"]
+            elif part["part_type"] == "attachment":
+                attm = Attachment(
+                    self.service,
+                    user_id,
+                    msg_id,
+                    part["attachment_id"],
+                    part["filename"],
+                    part["filetype"],
+                    part["data"],
+                )
+                attms.append(attm)
 
-            plain_msg = None
-            html_msg = None
-            attms = []
-            for part in parts:
-                if part['part_type'] == 'plain':
-                    if plain_msg is None:
-                        plain_msg = part['body']
-                    else:
-                        plain_msg += '\n' + part['body']
-                elif part['part_type'] == 'html':
-                    if html_msg is None:
-                        html_msg = part['body']
-                    else:
-                        html_msg += '<br/>' + part['body']
-                elif part['part_type'] == 'attachment':
-                    attm = Attachment(self.service, user_id, msg_id,
-                                      part['attachment_id'], part['filename'],
-                                      part['filetype'], part['data'])
-                    attms.append(attm)
-
-            return Message(
-                self.service,
-                self.creds,
-                user_id,
-                msg_id,
-                thread_id,
-                recipient,
-                sender,
-                subject,
-                date,
-                snippet,
-                plain_msg,
-                html_msg,
-                label_ids,
-                attms,
-                msg_hdrs,
-                cc,
-                bcc
-            )
+        return Message(
+            self.service,
+            self.creds,
+            user_id,
+            msg_id,
+            thread_id,
+            recipient,
+            sender,
+            subject,
+            date,
+            snippet,
+            plain_msg,
+            html_msg,
+            label_ids,
+            attms,
+            msg_hdrs,
+            cc,
+            bcc,
+        )
 
     def _evaluate_message_payload(
-        self,
-        payload: dict,
-        user_id: str,
-        msg_id: str,
-        attachments: str = 'reference'
-    ) -> List[dict]:
+        self, payload: dict, user_id: str, msg_id: str, attachments: str = "reference"
+    ) -> list[dict]:
         """
         Recursively evaluates a message payload.
 
@@ -878,57 +790,60 @@ class Gmail(object):
 
         """
 
-        if 'attachmentId' in payload['body']:  # if it's an attachment
-            if attachments == 'ignore':
+        if "attachmentId" in payload["body"]:  # if it's an attachment
+            if attachments == "ignore":
                 return []
 
-            att_id = payload['body']['attachmentId']
-            filename = payload['filename']
+            att_id = payload["body"]["attachmentId"]
+            filename = payload["filename"]
             if not filename:
-                filename = 'unknown'
+                filename = "unknown"
 
             obj = {
-                'part_type': 'attachment',
-                'filetype': payload['mimeType'],
-                'filename': filename,
-                'attachment_id': att_id,
-                'data': None
+                "part_type": "attachment",
+                "filetype": payload["mimeType"],
+                "filename": filename,
+                "attachment_id": att_id,
+                "data": None,
             }
 
-            if attachments == 'reference':
+            if attachments == "reference":
                 return [obj]
 
-            else:  # attachments == 'download'
-                if 'data' in payload['body']:
-                    data = payload['body']['data']
-                else:
-                    res = self.service.users().messages().attachments().get(
-                        userId=user_id, messageId=msg_id, id=att_id
-                    ).execute()
-                    data = res['data']
+            # attachments == 'download'
+            if "data" in payload["body"]:
+                data = payload["body"]["data"]
+            else:
+                res = (
+                    self.service.users()
+                    .messages()
+                    .attachments()
+                    .get(userId=user_id, messageId=msg_id, id=att_id)
+                    .execute()
+                )
+                data = res["data"]
 
-                file_data = base64.urlsafe_b64decode(data)
-                obj['data'] = file_data
-                return [obj]
+            file_data = base64.urlsafe_b64decode(data)
+            obj["data"] = file_data
+            return [obj]
 
-        elif payload['mimeType'] == 'text/html':
-            data = payload['body']['data']
+        if payload["mimeType"] == "text/html":
+            data = payload["body"]["data"]
             data = base64.urlsafe_b64decode(data)
-            body = BeautifulSoup(data, 'lxml', from_encoding='utf-8').body
-            return [{ 'part_type': 'html', 'body': str(body) }]
+            body = BeautifulSoup(data, "lxml", from_encoding="utf-8").body
+            return [{"part_type": "html", "body": str(body)}]
 
-        elif payload['mimeType'] == 'text/plain':
-            data = payload['body']['data']
+        if payload["mimeType"] == "text/plain":
+            data = payload["body"]["data"]
             data = base64.urlsafe_b64decode(data)
-            body = data.decode('UTF-8')
-            return [{ 'part_type': 'plain', 'body': body }]
+            body = data.decode("UTF-8")
+            return [{"part_type": "plain", "body": body}]
 
-        elif payload['mimeType'].startswith('multipart'):
+        if payload["mimeType"].startswith("multipart"):
             ret = []
-            if 'parts' in payload:
-                for part in payload['parts']:
-                    ret.extend(self._evaluate_message_payload(part, user_id, msg_id,
-                                                              attachments))
+            if "parts" in payload:
+                for part in payload["parts"]:
+                    ret.extend(self._evaluate_message_payload(part, user_id, msg_id, attachments))
             return ret
 
         return []
@@ -937,14 +852,14 @@ class Gmail(object):
         self,
         sender: str,
         to: str,
-        subject: str = '',
-        msg_html: str = None,
-        msg_plain: str = None,
-        cc: List[str] = None,
-        bcc: List[str] = None,
-        attachments: List[str] = None,
+        subject: str = "",
+        msg_html: Optional[str] = None,
+        msg_plain: Optional[str] = None,
+        cc: Optional[list[str]] = None,
+        bcc: Optional[list[str]] = None,
+        attachments: Optional[list[str]] = None,
         signature: bool = False,
-        user_id: str = 'me'
+        user_id: str = "me",
     ) -> dict:
         """
         Creates the raw email message to be sent.
@@ -968,35 +883,35 @@ class Gmail(object):
 
         """
 
-        msg = MIMEMultipart('mixed' if attachments else 'alternative')
-        msg['To'] = to
-        msg['From'] = sender
-        msg['Subject'] = subject
+        msg = MIMEMultipart("mixed" if attachments else "alternative")
+        msg["To"] = to
+        msg["From"] = sender
+        msg["Subject"] = subject
 
         if cc:
-            msg['Cc'] = ', '.join(cc)
+            msg["Cc"] = ", ".join(cc)
 
         if bcc:
-            msg['Bcc'] = ', '.join(bcc)
+            msg["Bcc"] = ", ".join(bcc)
 
         if signature:
-            m = re.match(r'.+\s<(?P<addr>.+@.+\..+)>', sender)
-            address = m.group('addr') if m else sender
-            account_sig = self._get_alias_info(address, user_id)['signature']
+            m = re.match(r".+\s<(?P<addr>.+@.+\..+)>", sender)
+            address = m.group("addr") if m else sender
+            account_sig = self._get_alias_info(address, user_id)["signature"]
 
             if msg_html is None:
-                msg_html = ''
+                msg_html = ""
 
             msg_html += "<br /><br />" + account_sig
 
-        attach_plain = MIMEMultipart('alternative') if attachments else msg
-        attach_html = MIMEMultipart('related') if attachments else msg
+        attach_plain = MIMEMultipart("alternative") if attachments else msg
+        attach_html = MIMEMultipart("related") if attachments else msg
 
         if msg_plain:
-            attach_plain.attach(MIMEText(msg_plain, 'plain'))
+            attach_plain.attach(MIMEText(msg_plain, "plain"))
 
         if msg_html:
-            attach_html.attach(MIMEText(msg_html, 'html'))
+            attach_html.attach(MIMEText(msg_html, "html"))
 
         if attachments:
             attach_plain.attach(attach_html)
@@ -1004,15 +919,9 @@ class Gmail(object):
 
             self._ready_message_with_attachments(msg, attachments)
 
-        return {
-            'raw': base64.urlsafe_b64encode(msg.as_string().encode()).decode()
-        }
+        return {"raw": base64.urlsafe_b64encode(msg.as_string().encode()).decode()}
 
-    def _ready_message_with_attachments(
-        self,
-        msg: MIMEMultipart,
-        attachments: List[str]
-    ) -> None:
+    def _ready_message_with_attachments(self, msg: MIMEMultipart, attachments: list[str]) -> None:
         """
         Converts attachment filepaths to MIME objects and adds them to msg.
 
@@ -1026,34 +935,30 @@ class Gmail(object):
             content_type, encoding = mimetypes.guess_type(filepath)
 
             if content_type is None or encoding is not None:
-                content_type = 'application/octet-stream'
+                content_type = "application/octet-stream"
 
-            main_type, sub_type = content_type.split('/', 1)
-            with open(filepath, 'rb') as file:
+            main_type, sub_type = content_type.split("/", 1)
+            with open(filepath, "rb") as file:
                 raw_data = file.read()
 
                 attm: MIMEBase
-                if main_type == 'text':
-                    attm = MIMEText(raw_data.decode('UTF-8'), _subtype=sub_type)
-                elif main_type == 'image':
+                if main_type == "text":
+                    attm = MIMEText(raw_data.decode("UTF-8"), _subtype=sub_type)
+                elif main_type == "image":
                     attm = MIMEImage(raw_data, _subtype=sub_type)
-                elif main_type == 'audio':
+                elif main_type == "audio":
                     attm = MIMEAudio(raw_data, _subtype=sub_type)
-                elif main_type == 'application':
+                elif main_type == "application":
                     attm = MIMEApplication(raw_data, _subtype=sub_type)
                 else:
                     attm = MIMEBase(main_type, sub_type)
                     attm.set_payload(raw_data)
 
-            fname = os.path.basename(filepath)
-            attm.add_header('Content-Disposition', 'attachment', filename=fname)
+            fname = Path(filepath).name
+            attm.add_header("Content-Disposition", "attachment", filename=fname)
             msg.attach(attm)
 
-    def _get_alias_info(
-        self,
-        send_as_email: str,
-        user_id: str = 'me'
-    ) -> dict:
+    def _get_alias_info(self, send_as_email: str, user_id: str = "me") -> dict:
         """
         Returns the alias info of an email address on the authenticated
         account.
@@ -1088,8 +993,7 @@ class Gmail(object):
 
         """
 
-        req =  self.service.users().settings().sendAs().get(
-                   sendAsEmail=send_as_email, userId=user_id)
+        req = self.service.users().settings().sendAs().get(sendAsEmail=send_as_email, userId=user_id)
 
         res = req.execute()
         return res
