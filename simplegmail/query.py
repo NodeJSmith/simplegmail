@@ -5,7 +5,7 @@ This module contains functions for constructing Gmail search queries.
 
 """
 
-from typing import List, Union
+from typing import Union
 
 
 def construct_query(*query_dicts, **query_terms) -> str:
@@ -54,7 +54,7 @@ def construct_query(*query_dicts, **query_terms) -> str:
 
         subject (str): The subject of the message. E.g.: subject='Meeting'
 
-        labels (List[str]): Labels applied to the message (all must match).
+        labels (list[str]): Labels applied to the message (all must match).
             E.g.: labels=['Work', 'HR'] # Work AND HR
                   labels=[['Work', 'HR'], ['Home']] # (Work AND HR) OR Home
 
@@ -159,20 +159,17 @@ def construct_query(*query_dicts, **query_terms) -> str:
     terms = []
     for key, val in query_terms.items():
         exclude = False
-        if key.startswith('exclude'):
+        if key.startswith("exclude"):
             exclude = True
-            key = key[len('exclude_'):]
+            key = key[len("exclude_") :]
 
         query_fn = globals()[f"_{key}"]
         conjunction = _and if isinstance(val, tuple) else _or
 
-        if key in ['newer_than', 'older_than', 'near_words']:
-            if isinstance(val[0], (tuple, list)):
-                term = conjunction([query_fn(*v) for v in val])
-            else:
-                term = query_fn(*val)
+        if key in ["newer_than", "older_than", "near_words"]:
+            term = conjunction([query_fn(*v) for v in val]) if isinstance(val[0], (tuple, list)) else query_fn(*val)
 
-        elif key == 'labels':
+        elif key == "labels":
             if isinstance(val[0], (tuple, list)):
                 term = conjunction([query_fn(labels) for labels in val])
             else:
@@ -192,7 +189,7 @@ def construct_query(*query_dicts, **query_terms) -> str:
     return _and(terms)
 
 
-def _and(queries: List[str]) -> str:
+def _and(queries: list[str]) -> str:
     """
     Returns a query term matching the "and" of all query terms.
 
@@ -210,7 +207,7 @@ def _and(queries: List[str]) -> str:
     return f'({" ".join(queries)})'
 
 
-def _or(queries: List[str]) -> str:
+def _or(queries: list[str]) -> str:
     """
     Returns a query term matching the "or" of all query terms.
 
@@ -225,7 +222,7 @@ def _or(queries: List[str]) -> str:
     if len(queries) == 1:
         return queries[0]
 
-    return '{' + ' '.join(queries) + '}'
+    return "{" + " ".join(queries) + "}"
 
 
 def _exclude(term: str) -> str:
@@ -240,7 +237,7 @@ def _exclude(term: str) -> str:
 
     """
 
-    return f'-{term}'
+    return f"-{term}"
 
 
 def _sender(sender: str) -> str:
@@ -255,7 +252,7 @@ def _sender(sender: str) -> str:
 
     """
 
-    return f'from:{sender}'
+    return f"from:{sender}"
 
 
 def _recipient(recipient: str) -> str:
@@ -270,7 +267,7 @@ def _recipient(recipient: str) -> str:
 
     """
 
-    return f'to:{recipient}'
+    return f"to:{recipient}"
 
 
 def _subject(subject: str) -> str:
@@ -285,10 +282,10 @@ def _subject(subject: str) -> str:
 
     """
 
-    return f'subject:{subject}'
+    return f"subject:{subject}"
 
 
-def _labels(labels: Union[List[str], str]) -> str:
+def _labels(labels: Union[list[str], str]) -> str:
     """
     Returns a query term matching a multiple labels.
 
@@ -320,7 +317,7 @@ def _label(label: str) -> str:
 
     """
 
-    return f'label:{label}'
+    return f"label:{label}"
 
 
 def _spec_attachment(name_or_type: str) -> str:
@@ -336,7 +333,7 @@ def _spec_attachment(name_or_type: str) -> str:
 
     """
 
-    return f'filename:{name_or_type}'
+    return f"filename:{name_or_type}"
 
 
 def _exact_phrase(phrase: str) -> str:
@@ -357,31 +354,31 @@ def _exact_phrase(phrase: str) -> str:
 def _starred() -> str:
     """Returns a query term matching messages that are starred."""
 
-    return 'is:starred'
+    return "is:starred"
 
 
 def _snoozed() -> str:
     """Returns a query term matching messages that are snoozed."""
 
-    return 'is:snoozed'
+    return "is:snoozed"
 
 
 def _unread() -> str:
     """Returns a query term matching messages that are unread."""
 
-    return 'is:unread'
+    return "is:unread"
 
 
 def _read() -> str:
     """Returns a query term matching messages that are read."""
 
-    return 'is:read'
+    return "is:read"
 
 
 def _important() -> str:
     """Returns a query term matching messages that are important."""
 
-    return 'is:important'
+    return "is:important"
 
 
 def _cc(recipient: str) -> str:
@@ -397,7 +394,7 @@ def _cc(recipient: str) -> str:
 
     """
 
-    return f'cc:{recipient}'
+    return f"cc:{recipient}"
 
 
 def _bcc(recipient: str) -> str:
@@ -413,7 +410,7 @@ def _bcc(recipient: str) -> str:
 
     """
 
-    return f'bcc:{recipient}'
+    return f"bcc:{recipient}"
 
 
 def _after(date: str) -> str:
@@ -428,7 +425,7 @@ def _after(date: str) -> str:
 
     """
 
-    return f'after:{date}'
+    return f"after:{date}"
 
 
 def _before(date: str) -> str:
@@ -443,7 +440,7 @@ def _before(date: str) -> str:
 
     """
 
-    return f'before:{date}'
+    return f"before:{date}"
 
 
 def _older_than(number: int, unit: str) -> str:
@@ -459,7 +456,7 @@ def _older_than(number: int, unit: str) -> str:
 
     """
 
-    return f'older_than:{number}{unit[0]}'
+    return f"older_than:{number}{unit[0]}"
 
 
 def _newer_than(number: int, unit: str) -> str:
@@ -475,15 +472,10 @@ def _newer_than(number: int, unit: str) -> str:
 
     """
 
-    return f'newer_than:{number}{unit[0]}'
+    return f"newer_than:{number}{unit[0]}"
 
 
-def _near_words(
-    first: str,
-    second: str,
-    distance: int,
-    exact: bool = False
-) -> str:
+def _near_words(first: str, second: str, distance: int, exact: bool = False) -> str:
     """
     Returns a query term matching messages that two words within a certain
     distance of each other.
@@ -499,7 +491,7 @@ def _near_words(
 
     """
 
-    query = f'{first} AROUND {distance} {second}'
+    query = f"{first} AROUND {distance} {second}"
     if exact:
         query = '"' + query + '"'
 
@@ -509,7 +501,7 @@ def _near_words(
 def _attachment() -> str:
     """Returns a query term matching messages that have attachments."""
 
-    return 'has:attachment'
+    return "has:attachment"
 
 
 def _drive() -> str:
@@ -518,7 +510,7 @@ def _drive() -> str:
 
     """
 
-    return 'has:drive'
+    return "has:drive"
 
 
 def _docs() -> str:
@@ -527,7 +519,7 @@ def _docs() -> str:
 
     """
 
-    return 'has:document'
+    return "has:document"
 
 
 def _sheets() -> str:
@@ -536,7 +528,7 @@ def _sheets() -> str:
 
     """
 
-    return 'has:spreadsheet'
+    return "has:spreadsheet"
 
 
 def _slides() -> str:
@@ -545,7 +537,7 @@ def _slides() -> str:
 
     """
 
-    return 'has:presentation'
+    return "has:presentation"
 
 
 def _list(list_name: str) -> str:
@@ -560,7 +552,7 @@ def _list(list_name: str) -> str:
 
     """
 
-    return f'list:{list_name}'
+    return f"list:{list_name}"
 
 
 def _in(folder_name: str) -> str:
@@ -575,7 +567,7 @@ def _in(folder_name: str) -> str:
 
     """
 
-    return f'in:{folder_name}'
+    return f"in:{folder_name}"
 
 
 def _delivered_to(address: str) -> str:
@@ -590,7 +582,7 @@ def _delivered_to(address: str) -> str:
 
     """
 
-    return f'deliveredto:{address}'
+    return f"deliveredto:{address}"
 
 
 def _category(category: str) -> str:
@@ -605,7 +597,7 @@ def _category(category: str) -> str:
 
     """
 
-    return f'category:{category}'
+    return f"category:{category}"
 
 
 def _larger(size: str) -> str:
@@ -621,7 +613,7 @@ def _larger(size: str) -> str:
 
     """
 
-    return f'larger:{size}'
+    return f"larger:{size}"
 
 
 def _smaller(size: str) -> str:
@@ -637,7 +629,7 @@ def _smaller(size: str) -> str:
 
     """
 
-    return f'smaller:{size}'
+    return f"smaller:{size}"
 
 
 def _id(message_id: str) -> str:
@@ -652,7 +644,7 @@ def _id(message_id: str) -> str:
 
     """
 
-    return f'rfc822msgid:{message_id}'
+    return f"rfc822msgid:{message_id}"
 
 
 def _has(attribute: str) -> str:
@@ -667,4 +659,4 @@ def _has(attribute: str) -> str:
 
     """
 
-    return f'has:{attribute}'
+    return f"has:{attribute}"

@@ -5,17 +5,21 @@ This module contains the implementation of the Message object.
 
 """
 
-from typing import List, Optional, Union
+import typing
+from typing import Optional, Union
 
 from httplib2 import Http
-from googleapiclient.errors import HttpError
 
 from simplegmail import label
 from simplegmail.attachment import Attachment
 from simplegmail.label import Label
 
+if typing.TYPE_CHECKING:
+    from googleapiclient._apis.gmail.v1 import GmailResource  # type: ignore
+    from oauth2client.client import OAuth2Credentials
 
-class Message(object):
+
+class Message:
     """
     The Message class for emails in your Gmail mailbox. This class should not
     be manually constructed. Contains all information about the associated
@@ -41,7 +45,7 @@ class Message(object):
         bcc: who the message was bcc'd on the message.
 
     Attributes:
-        _service (googleapiclient.discovery.Resource): the Gmail service object.
+        _service (GmailResource): the Gmail service object.
         user_id (str): the username of the account the message belongs to.
         id (str): the message id.
         recipient (str): who the message was addressed to.
@@ -51,18 +55,18 @@ class Message(object):
         snippet (str): the snippet line for the message.
         plain (str): the plaintext contents of the message.
         html (str): the HTML contents of the message.
-        label_ids (List[str]): the ids of labels associated with this message.
-        attachments (List[Attachment]): a list of attachments for the message.
+        label_ids (list[str]): the ids of labels associated with this message.
+        attachments (list[Attachment]): a list of attachments for the message.
         headers (dict): a dict of header values.
-        cc (List[str]): who the message was cc'd on the message.
-        bcc (List[str]): who the message was bcc'd on the message.
+        cc (list[str]): who the message was cc'd on the message.
+        bcc (list[str]): who the message was bcc'd on the message.
 
     """
 
     def __init__(
         self,
-        service: 'googleapiclient.discovery.Resource',
-        creds: 'oauth2client.client.OAuth2Credentials',
+        service: "GmailResource",
+        creds: "OAuth2Credentials",
         user_id: str,
         msg_id: str,
         thread_id: str,
@@ -73,11 +77,11 @@ class Message(object):
         snippet,
         plain: Optional[str] = None,
         html: Optional[str] = None,
-        label_ids: Optional[List[str]] = None,
-        attachments: Optional[List[Attachment]] = None,
+        label_ids: Optional[list[str]] = None,
+        attachments: Optional[list[Attachment]] = None,
         headers: Optional[dict] = None,
-        cc: Optional[List[str]] = None,
-        bcc: Optional[List[str]] = None
+        cc: Optional[list[str]] = None,
+        bcc: Optional[list[str]] = None,
     ) -> None:
         self._service = service
         self.creds = creds
@@ -98,7 +102,7 @@ class Message(object):
         self.bcc = bcc or []
 
     @property
-    def service(self) -> 'googleapiclient.discovery.Resource':
+    def service(self) -> "GmailResource":
         if self.creds.access_token_expired:
             self.creds.refresh(Http())
 
@@ -107,9 +111,7 @@ class Message(object):
     def __repr__(self) -> str:
         """Represents the object by its sender, recipient, and id."""
 
-        return (
-            f'Message(to: {self.recipient}, from: {self.sender}, id: {self.id})'
-        )
+        return f"Message(to: {self.recipient}, from: {self.sender}, id: {self.id})"
 
     def mark_as_read(self) -> None:
         """
@@ -237,20 +239,11 @@ class Message(object):
 
         """
 
-        try:
-            res = self._service.users().messages().trash(
-                userId=self.user_id, id=self.id,
-            ).execute()
+        res = self._service.users().messages().trash(userId=self.user_id, id=self.id).execute()
 
-        except HttpError as error:
-            # Pass error along
-            raise error
+        assert label.TRASH in res["labelIds"], "An error occurred in a call to `trash`."
 
-        else:
-            assert label.TRASH in res['labelIds'], \
-                f'An error occurred in a call to `trash`.'
-
-            self.label_ids = res['labelIds']
+        self.label_ids = res["labelIds"]
 
     def untrash(self) -> None:
         """
@@ -262,20 +255,10 @@ class Message(object):
 
         """
 
-        try:
-            res = self._service.users().messages().untrash(
-                userId=self.user_id, id=self.id,
-            ).execute()
+        res = self._service.users().messages().untrash(userId=self.user_id, id=self.id).execute()
+        assert label.TRASH not in res["labelIds"], "An error occurred in a call to `untrash`."
 
-        except HttpError as error:
-            # Pass error along
-            raise error
-
-        else:
-            assert label.TRASH not in res['labelIds'], \
-                f'An error occurred in a call to `untrash`.'
-
-            self.label_ids = res['labelIds']
+        self.label_ids = res["labelIds"]
 
     def move_from_inbox(self, to: Union[Label, str]) -> None:
         """
@@ -307,7 +290,7 @@ class Message(object):
 
         self.add_labels([to_add])
 
-    def add_labels(self, to_add: Union[List[Label], List[str]]) -> None:
+    def add_labels(self, to_add: Union[list[Label], list[str]]) -> None:
         """
         Adds the given labels to the message.
 
@@ -337,7 +320,7 @@ class Message(object):
 
         self.remove_labels([to_remove])
 
-    def remove_labels(self, to_remove: Union[List[Label], List[str]]) -> None:
+    def remove_labels(self, to_remove: Union[list[Label], list[str]]) -> None:
         """
         Removes the given labels from the message.
 
@@ -353,9 +336,7 @@ class Message(object):
         self.modify_labels([], to_remove)
 
     def modify_labels(
-        self,
-        to_add: Union[Label, str, List[Label], List[str]],
-        to_remove: Union[Label, str, List[Label], List[str]]
+        self, to_add: Union[Label, str, list[Label], list[str]], to_remove: Union[Label, str, list[Label], list[str]]
     ) -> None:
         """
         Adds or removes the specified label.
@@ -376,27 +357,23 @@ class Message(object):
         if isinstance(to_remove, (Label, str)):
             to_remove = [to_remove]
 
-        try:
-            res = self._service.users().messages().modify(
-                userId=self.user_id, id=self.id,
-                body=self._create_update_labels(to_add, to_remove)
-            ).execute()
+        res = (
+            self._service.users()
+            .messages()
+            .modify(userId=self.user_id, id=self.id, body=self._create_update_labels(to_add, to_remove))
+            .execute()
+        )
 
-        except HttpError as error:
-            # Pass along error
-            raise error
+        assert all(lbl in res["labelIds"] for lbl in to_add) and all(
+            lbl not in res["labelIds"] for lbl in to_remove
+        ), "An error occurred while modifying message label."
 
-        else:
-            assert all([lbl in res['labelIds'] for lbl in to_add]) \
-                and all([lbl not in res['labelIds'] for lbl in to_remove]), \
-                'An error occurred while modifying message label.'
-
-            self.label_ids = res['labelIds']
+        self.label_ids = res["labelIds"]
 
     def _create_update_labels(
         self,
-        to_add: Union[List[Label], List[str]] = None,
-        to_remove: Union[List[Label], List[str]] = None
+        to_add: Optional[Union[list[Label], list[str]]] = None,
+        to_remove: Optional[Union[list[Label], list[str]]] = None,
     ) -> dict:
         """
         Creates an object for updating message label.
@@ -410,17 +387,10 @@ class Message(object):
 
         """
 
-        if to_add is None:
-            to_add = []
-
-        if to_remove is None:
-            to_remove = []
+        to_add = to_add or []
+        to_remove = to_remove or []
 
         return {
-            'addLabelIds': [
-                lbl.id if isinstance(lbl, Label) else lbl for lbl in to_add
-            ],
-            'removeLabelIds': [
-                lbl.id if isinstance(lbl, Label) else lbl for lbl in to_remove
-            ]
+            "addLabelIds": [lbl.id if isinstance(lbl, Label) else lbl for lbl in to_add],
+            "removeLabelIds": [lbl.id if isinstance(lbl, Label) else lbl for lbl in to_remove],
         }

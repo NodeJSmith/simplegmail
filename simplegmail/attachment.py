@@ -6,12 +6,17 @@ This module contains the implementation of the Attachment object.
 """
 
 import base64  # for base64.urlsafe_b64decode
-import os      # for os.path.exists
+import typing
+from pathlib import Path
 from typing import Optional
 
-class Attachment(object):
+if typing.TYPE_CHECKING:
+    from googleapiclient._apis.gmail.v1 import GmailResource  # type: ignore
+
+
+class Attachment:
     """
-    The Attachment class for attachments to emails in your Gmail mailbox. This 
+    The Attachment class for attachments to emails in your Gmail mailbox. This
     class should not be manually instantiated.
 
     Args:
@@ -24,7 +29,7 @@ class Attachment(object):
         data: The raw data of the file. Default None.
 
     Attributes:
-        _service (googleapiclient.discovery.Resource): The Gmail service object.
+        _service (GmailResource): The Gmail service object.
         user_id (str): The username of the account the message belongs to.
         msg_id (str): The id of message the attachment belongs to.
         id (str): The id of the attachment.
@@ -33,16 +38,16 @@ class Attachment(object):
         data (bytes): The raw data of the file.
 
     """
-    
+
     def __init__(
         self,
-        service: 'googleapiclient.discovery.Resource',
+        service: "GmailResource",
         user_id: str,
         msg_id: str,
         att_id: str,
         filename: str,
         filetype: str,
-        data: Optional[bytes] = None
+        data: Optional[bytes] = None,
     ) -> None:
         self._service = service
         self.user_id = user_id
@@ -55,54 +60,52 @@ class Attachment(object):
     def download(self) -> None:
         """
         Downloads the data for an attachment if it does not exist.
-        
+
         Raises:
-            googleapiclient.errors.HttpError: There was an error executing the 
+            googleapiclient.errors.HttpError: There was an error executing the
                 HTTP request.
-        
+
         """
-        
+
         if self.data is not None:
             return
 
-        res = self._service.users().messages().attachments().get(
-            userId=self.user_id, messageId=self.msg_id, id=self.id
-        ).execute()
+        res = (
+            self._service.users()
+            .messages()
+            .attachments()
+            .get(userId=self.user_id, messageId=self.msg_id, id=self.id)
+            .execute()
+        )
 
-        data = res['data']
+        data = res["data"]
         self.data = base64.urlsafe_b64decode(data)
 
-    def save(
-        self,
-        filepath: Optional[str] = None,
-        overwrite: bool = False
-    ) -> None:
+    def save(self, filepath: Optional[str] = None, overwrite: bool = False) -> None:
         """
         Saves the attachment. Downloads file data if not downloaded.
-        
+
         Args:
-            filepath: where to save the attachment. Default None, which uses 
+            filepath: where to save the attachment. Default None, which uses
                 the filename stored.
             overwrite: whether to overwrite existing files. Default False.
-        
+
         Raises:
-            FileExistsError: if the call would overwrite an existing file and 
+            FileExistsError: if the call would overwrite an existing file and
                 overwrite is not set to True.
-        
+
         """
-        
+
         if filepath is None:
             filepath = self.filename
 
         if self.data is None:
             self.download()
 
-        if not overwrite and os.path.exists(filepath):
+        if not overwrite and Path(filepath).exists():
             raise FileExistsError(
-                f"Cannot overwrite file '{filepath}'. Use overwrite=True if "
-                f"you would like to overwrite the file."
+                f"Cannot overwrite file '{filepath}'. Use overwrite=True if " f"you would like to overwrite the file."
             )
 
-        with open(filepath, 'wb') as f:
+        with open(filepath, "wb") as f:
             f.write(self.data)
-
