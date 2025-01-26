@@ -364,9 +364,9 @@ class Message:
             .execute()
         )
 
-        assert all(lbl in res["labelIds"] for lbl in to_add) and all(
-            lbl not in res["labelIds"] for lbl in to_remove
-        ), "An error occurred while modifying message label."
+        assert all(lbl in res["labelIds"] for lbl in to_add) and all(lbl not in res["labelIds"] for lbl in to_remove), (
+            "An error occurred while modifying message label."
+        )
 
         self.label_ids = res["labelIds"]
 

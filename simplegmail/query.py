@@ -204,7 +204,7 @@ def _and(queries: list[str]) -> str:
     if len(queries) == 1:
         return queries[0]
 
-    return f'({" ".join(queries)})'
+    return f"({' '.join(queries)})"
 
 
 def _or(queries: list[str]) -> str:
