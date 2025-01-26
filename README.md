@@ -12,23 +12,25 @@ Currently Supported Behavior:
 - Sending messages with your Gmail account signature
 - Retrieving messages with the full suite of Gmail's search capabilities
 - Retrieving messages with attachments, and downloading attachments
-- Modifying message labels (includes marking as read/unread, important/not 
+- Modifying message labels (includes marking as read/unread, important/not
   important, starred/unstarred, trash/untrash, inbox/archive)
 
 ## Table of Contents
 
-- [Getting Started](#getting-started)
-- [Installation](#installation)
-- [Usage](#usage)
-    - [Send a simple message](#send-a-simple-message)
-    - [Send a message with attachments, cc, bcc fields](#send-a-message-with-attachments-cc-bcc-fields)
-    - [Retrieving messages](#retrieving-messages)
-    - [Marking messages](#marking-messages)
-    - [Changing message labels](#changing-message-labels)
-    - [Downloading attachments](#downloading-attachments)
-    - [Retrieving messages with queries](#retrieving-messages-advanced-with-queries)
-    - [Retrieving messages with more advanced queries](#retrieving-messages-more-advanced-with-more-queries)
-- [Feedback](#feedback)
+- [simplegmail](#simplegmail)
+  - [Table of Contents](#table-of-contents)
+  - [Getting Started](#getting-started)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [Send a simple message:](#send-a-simple-message)
+    - [Send a message with attachments, cc, bcc fields:](#send-a-message-with-attachments-cc-bcc-fields)
+    - [Retrieving messages:](#retrieving-messages)
+    - [Marking messages:](#marking-messages)
+    - [Changing message labels:](#changing-message-labels)
+    - [Downloading attachments:](#downloading-attachments)
+    - [Retrieving messages (advanced, with queries!):](#retrieving-messages-advanced-with-queries)
+    - [Retrieving messages (more advanced, with more queries!):](#retrieving-messages-more-advanced-with-more-queries)
+  - [Feedback](#feedback)
 
 ## Getting Started
 
@@ -36,39 +38,39 @@ The only setup required is to download an OAuth 2.0 Client ID file from Google
 that will authorize your application.
 
 This can be done at: https://console.developers.google.com/apis/credentials.
-For those who haven't created a credential for Google's API, after clicking the 
+For those who haven't created a credential for Google's API, after clicking the
 link above (and logging in to the appropriate account),
 
-1. Select/create the project that this authentication is for (if creating a new 
-project make sure to configure the OAuth consent screen; you only need to set 
+1. Select/create the project that this authentication is for (if creating a new
+project make sure to configure the OAuth consent screen; you only need to set
 an Application name)
 
-2. Click on the "Dashboard" tab, then "Enable APIs and Services". Search for 
+2. Click on the "Dashboard" tab, then "Enable APIs and Services". Search for
 Gmail and enable.
 
 3. Click on the Credentials tab, then "Create Credentials" > "OAuth client ID".
 
 4. Select what kind of application this is for, and give it a memorable name.
-Fill out all necessary information for the credential (e.g., if choosing 
-"Web Application" make sure to add an Authorized Redirect URI. See 
-https://developers.google.com/identity/protocols/oauth2 for more infomation).
+Fill out all necessary information for the credential (e.g., if choosing
+"Web Application" make sure to add an Authorized Redirect URI. See
+https://developers.google.com/identity/protocols/oauth2 for more information).
 
-5. Back on the credentials screen, click the download icon next to the 
+5. Back on the credentials screen, click the download icon next to the
 credential you just created to download it as a JSON object.
 
-6. Save this file as "client_secret.json" and place it in the root directory of 
-your application. (The `Gmail` class takes in an argument for the name of this 
+6. Save this file as "client_secret.json" and place it in the root directory of
+your application. (The `Gmail` class takes in an argument for the name of this
 file if you choose to name it otherwise.)
 
-The first time you create a new instance of the `Gmail` class, a browser window 
-will open, and you'll be asked to give permissions to the application. This 
-will save an access token in a file named "gmail-token.json", and only needs to 
+The first time you create a new instance of the `Gmail` class, a browser window
+will open, and you'll be asked to give permissions to the application. This
+will save an access token in a file named "gmail-token.json", and only needs to
 occur once.
 
 You are now good to go!
 
-Note about authentication method: I have opted not to use a username-password 
-authentication (through imap/smtp), since using Google's authorization is both 
+Note about authentication method: I have opted not to use a username-password
+authentication (through imap/smtp), since using Google's authorization is both
 significantly safer and avoids clashing with Google's many security measures.
 
 ## Installation
@@ -144,7 +146,7 @@ for message in messages:
     print("Subject: " + message.subject)
     print("Date: " + message.date)
     print("Preview: " + message.snippet)
-    
+
     print("Message Body: " + message.plain)  # or message.html
 ```
 
@@ -179,7 +181,7 @@ from simplegmail import Gmail
 
 gmail = Gmail()
 
-# Get the label objects for your account. Each label has a specific ID that 
+# Get the label objects for your account. Each label has a specific ID that
 # you need, not just the name!
 labels = gmail.list_labels()
 
@@ -190,7 +192,7 @@ messages = gmail.get_unread_inbox()
 
 # We can add/remove a label
 message = messages[0]
-message.add_label(finance_label) 
+message.add_label(finance_label)
 
 # We can "move" a message from one label to another
 message.modify_labels(to_add=labels[10], to_remove=finance_label)
