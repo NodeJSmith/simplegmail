@@ -121,3 +121,4 @@ test.py
 
 .DS_Store
 scratch.py
+.vscode/
