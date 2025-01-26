@@ -7,14 +7,15 @@ attachments) and retrieving mail with the full suite of Gmail search options.
 """
 
 import base64
-import functools
+import contextlib
 import html
-import math
+import logging
 import mimetypes
-import operator
+import os
 import re
-import threading
 import typing
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from email.mime.application import MIMEApplication
 from email.mime.audio import MIMEAudio
 from email.mime.base import MIMEBase
@@ -22,13 +23,16 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import ClassVar, Literal, Optional, Union
 
 import dateutil.parser as parser
+import httpx
 from bs4 import BeautifulSoup
 from googleapiclient.discovery import build
 from httplib2 import Http
 from oauth2client import client, file, tools
+from tenacity import after_log, before_log, before_sleep_log, retry, stop_after_attempt, wait_exponential
+from typing_extensions import TypedDict
 
 from simplegmail import label
 from simplegmail.attachment import Attachment
@@ -39,6 +43,30 @@ if typing.TYPE_CHECKING:
     from googleapiclient._apis.gmail.v1 import GmailResource  # type: ignore
 
 
+LOG_LEVEL = os.getenv("SIMPLEGMAIL_LOG_LEVEL", "INFO")
+
+LOG_FMT = "{asctime} - {module}.{funcName}:{lineno} - {levelname} - {message}"
+DATE_FMT = "%Y-%m-%d %H:%M:%S%z"
+
+LOGGER = logging.getLogger("simplegmail")
+
+LOGGER.setLevel(LOG_LEVEL)
+
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter(fmt=LOG_FMT, datefmt=DATE_FMT, style="{"))
+
+LOGGER.addHandler(handler)
+
+GET_MSG_URL_TEMPLATE = (
+    "https://gmail.googleapis.com/gmail/v1/users/{user_id}/messages/{message_id}?format={message_format}&alt=json"
+)
+MODIFY_MSG_URL_TEMPLATE = "https://gmail.googleapis.com/gmail/v1/users/{user_id}/messages/{message_id}/modify"
+
+
+ATTACHMENT_FORMAT = Literal["reference", "download", "ignore"]
+MESSAGE_FORMAT = Literal["minimal", "full", "metadata"]
+
+
 CLIENT_SECRET_FILE_NOT_FOUND_MSG = (
     "Your 'client_secret.json' file is nonexistent. Make sure "
     "the file is in the root directory of your application. If "
@@ -46,6 +74,11 @@ CLIENT_SECRET_FILE_NOT_FOUND_MSG = (
     "developers.google.com/gmail/api/quickstart/python, and "
     "follow the instructions listed there."
 )
+
+
+class MessageRef(TypedDict):
+    id: str
+    threadId: str
 
 
 class Gmail:
@@ -113,6 +146,8 @@ class Gmail:
 
         self._service: GmailResource = build("gmail", "v1", http=self.creds.authorize(Http()), cache_discovery=False)
 
+        self.labels = {x.id: x for x in self.list_labels(user_id="me")}
+
     @property
     def service(self) -> "GmailResource":
         # Since the token is only used through calls to the service object,
@@ -121,6 +156,18 @@ class Gmail:
             self.creds.refresh(Http())
 
         return self._service
+
+    @property
+    def _messages(self) -> "GmailResource.UsersResource.MessagesResource":
+        return self.service.users().messages()
+
+    def reload_labels(self) -> None:
+        """
+        Reloads the labels for the Gmail account.
+
+        """
+
+        self.labels = {x.id: x for x in self.list_labels(user_id="me")}
 
     def send_message(
         self,
@@ -176,12 +223,17 @@ class Gmail:
             user_id=user_id,
         )
 
-        req = self.service.users().messages().send(userId="me", body=msg)
+        req = self._messages.send(userId="me", body=msg)
         res = req.execute()
         return self._build_message_from_ref(user_id, res, "reference")
 
     def get_unread_inbox(
-        self, user_id: str = "me", labels: Optional[list[Label]] = None, query: str = "", attachments: str = "reference"
+        self,
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets unread messages from your inbox.
@@ -191,7 +243,7 @@ class Gmail:
                 user.
             labels: Labels that messages must match.
             query: A Gmail query to match.
-            attachments: Accepted values are 'ignore' which completely
+            attachment_format: Accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -209,15 +261,16 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.INBOX)
-        return self.get_unread_messages(user_id, labels, query, attachments)
+        return self.get_unread_messages(user_id, labels, query, attachment_format, message_format=message_format)
 
     def get_starred_messages(
         self,
         user_id: str = "me",
         labels: Optional[list[Label]] = None,
         query: str = "",
-        attachments: str = "reference",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
         include_spam_trash: bool = False,
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets starred messages from your account.
@@ -246,15 +299,23 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.STARRED)
-        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=include_spam_trash,
+            message_format=message_format,
+        )
 
     def get_important_messages(
         self,
         user_id: str = "me",
         labels: Optional[list[Label]] = None,
         query: str = "",
-        attachments: str = "reference",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
         include_spam_trash: bool = False,
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets messages marked important from your account.
@@ -264,7 +325,7 @@ class Gmail:
                 user.
             labels: Label IDs messages must match.
             query: A Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -283,15 +344,23 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.IMPORTANT)
-        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=include_spam_trash,
+            message_format=message_format,
+        )
 
     def get_unread_messages(
         self,
         user_id: str = "me",
         labels: Optional[list[Label]] = None,
         query: str = "",
-        attachments: str = "reference",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
         include_spam_trash: bool = False,
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets unread messages from your account.
@@ -301,7 +370,7 @@ class Gmail:
                 user.
             labels: Label IDs messages must match.
             query: A Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -320,15 +389,23 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.UNREAD)
-        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=include_spam_trash,
+            message_format=message_format,
+        )
 
     def get_drafts(
         self,
         user_id: str = "me",
         labels: Optional[list[Label]] = None,
         query: str = "",
-        attachments: str = "reference",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
         include_spam_trash: bool = False,
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets drafts saved in your account.
@@ -338,7 +415,7 @@ class Gmail:
                 user.
             labels: Label IDs messages must match.
             query: A Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -357,15 +434,23 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.DRAFT)
-        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=include_spam_trash,
+            message_format=message_format,
+        )
 
     def get_sent_messages(
         self,
         user_id: str = "me",
         labels: Optional[list[Label]] = None,
         query: str = "",
-        attachments: str = "reference",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
         include_spam_trash: bool = False,
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets sent messages from your account.
@@ -375,7 +460,7 @@ class Gmail:
                 user.
             labels: Label IDs messages must match.
             query: A Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -394,10 +479,22 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.SENT)
-        return self.get_messages(user_id, labels, query, attachments, include_spam_trash)
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=include_spam_trash,
+            message_format=message_format,
+        )
 
     def get_trash_messages(
-        self, user_id: str = "me", labels: Optional[list[Label]] = None, query: str = "", attachments: str = "reference"
+        self,
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets messages in your trash from your account.
@@ -407,7 +504,7 @@ class Gmail:
                 user.
             labels: Label IDs messages must match.
             query: A Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -425,10 +522,22 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.TRASH)
-        return self.get_messages(user_id, labels, query, attachments, True)
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=True,
+            message_format=message_format,
+        )
 
     def get_spam_messages(
-        self, user_id: str = "me", labels: Optional[list[Label]] = None, query: str = "", attachments: str = "reference"
+        self,
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets messages marked as spam from your account.
@@ -438,7 +547,7 @@ class Gmail:
                 user.
             labels: Label IDs messages must match.
             query: A Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -456,15 +565,76 @@ class Gmail:
         labels = labels or []
 
         labels.append(label.SPAM)
-        return self.get_messages(user_id, labels, query, attachments, True)
+
+        return self.get_messages(
+            user_id=user_id,
+            labels=labels,
+            query=query,
+            attachment_format=attachment_format,
+            include_spam_trash=True,
+            message_format=message_format,
+        )
+
+    def _get_references(
+        self,
+        user_id: str = "me",
+        labels: Optional[list[Label]] = None,
+        query: str = "",
+        include_spam_trash: bool = False,
+    ) -> list[MessageRef]:
+        """
+        Gets messages from your account.
+
+        Args:
+            user_id: the user's email address. Default 'me', the authenticated
+                user.
+            labels: label IDs messages must match.
+            query: a Gmail query to match.
+            include_spam_trash: whether to include messages from spam or trash.
+
+        Returns:
+            A list of reference objects.
+
+        Raises:
+            googleapiclient.errors.HttpError: There was an error executing the
+                HTTP request.
+
+        """
+
+        labels = labels or []
+
+        labels_ids = [lbl.id if isinstance(lbl, Label) else lbl for lbl in labels]
+
+        response = self._messages.list(
+            userId=user_id, q=query, labelIds=labels_ids, includeSpamTrash=include_spam_trash
+        ).execute()
+
+        message_refs = []
+        if "messages" in response:  # ensure request was successful
+            message_refs.extend(response["messages"])
+
+        while "nextPageToken" in response:
+            page_token = response["nextPageToken"]
+            response = self._messages.list(
+                userId=user_id,
+                q=query,
+                labelIds=labels_ids,
+                includeSpamTrash=include_spam_trash,
+                pageToken=page_token,
+            ).execute()
+
+            message_refs.extend(response["messages"])
+
+        return message_refs
 
     def get_messages(
         self,
         user_id: str = "me",
         labels: Optional[list[Label]] = None,
         query: str = "",
-        attachments: str = "reference",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
         include_spam_trash: bool = False,
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Gets messages from your account.
@@ -474,7 +644,7 @@ class Gmail:
                 user.
             labels: label IDs messages must match.
             query: a Gmail query to match.
-            attachments: accepted values are 'ignore' which completely
+            attachment_format: accepted values are 'ignore' which completely
                 ignores all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -490,39 +660,9 @@ class Gmail:
 
         """
 
-        labels = labels or []
+        message_refs = self._get_references(user_id, labels, query, include_spam_trash)
 
-        labels_ids = [lbl.id if isinstance(lbl, Label) else lbl for lbl in labels]
-
-        response = (
-            self.service.users()
-            .messages()
-            .list(userId=user_id, q=query, labelIds=labels_ids, includeSpamTrash=include_spam_trash)
-            .execute()
-        )
-
-        message_refs = []
-        if "messages" in response:  # ensure request was successful
-            message_refs.extend(response["messages"])
-
-        while "nextPageToken" in response:
-            page_token = response["nextPageToken"]
-            response = (
-                self.service.users()
-                .messages()
-                .list(
-                    userId=user_id,
-                    q=query,
-                    labelIds=labels_ids,
-                    includeSpamTrash=include_spam_trash,
-                    pageToken=page_token,
-                )
-                .execute()
-            )
-
-            message_refs.extend(response["messages"])
-
-        return self._get_messages_from_refs(user_id, message_refs, attachments)
+        return self._get_messages_from_refs(user_id, message_refs, attachment_format, message_format=message_format)
 
     def list_labels(self, user_id: str = "me") -> list[Label]:
         """
@@ -593,8 +733,44 @@ class Gmail:
 
         self.service.users().labels().delete(userId=user_id, id=label.id).execute()
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(max=4),
+        after=after_log(LOGGER, logging.DEBUG),
+        before=before_log(LOGGER, logging.DEBUG),
+        before_sleep=before_sleep_log(LOGGER, logging.INFO),
+    )
+    def fetch_message(
+        self,
+        client: httpx.Client,
+        headers: dict[str, str],
+        user_id: str,
+        message_id: str,
+        message_format: MESSAGE_FORMAT,
+    ):
+        url = GET_MSG_URL_TEMPLATE.format(user_id=user_id, message_id=message_id, message_format=message_format)
+        response = client.get(url, headers=headers)
+        response.raise_for_status()
+
+        return response
+
+    def fetch_all_messages(self, user_id: str, message_refs: list[dict], headers: dict, message_format: MESSAGE_FORMAT):
+        with httpx.Client() as client, ThreadPoolExecutor() as pool:
+            tasks = [
+                pool.submit(self.fetch_message, client, headers, user_id, message["id"], message_format)
+                for message in message_refs
+            ]
+            responses = [task.result() for task in tasks]
+
+        return responses
+
     def _get_messages_from_refs(
-        self, user_id: str, message_refs: list[dict], attachments: str = "reference", parallel: bool = True
+        self,
+        user_id: str,
+        message_refs: list[MessageRef],
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+        message_format: MESSAGE_FORMAT = "full",
     ) -> list[Message]:
         """
         Retrieves the actual messages from a list of references.
@@ -602,15 +778,11 @@ class Gmail:
         Args:
             user_id: The account the messages belong to.
             message_refs: A list of message references with keys id, threadId.
-            attachments: Accepted values are 'ignore' which completely ignores
+            attachment_format: Accepted values are 'ignore' which completely ignores
                 all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download'
                 which downloads the attachment data to store locally. Default
                 'reference'.
-            parallel: Whether to retrieve messages in parallel. Default true.
-                Currently parallelization is always on, since there is no
-                reason to do otherwise.
-
 
         Returns:
             A list of Message objects.
@@ -624,45 +796,118 @@ class Gmail:
         if not message_refs:
             return []
 
-        if not parallel:
-            return [self._build_message_from_ref(user_id, ref, attachments) for ref in message_refs]
+        # build a fake message to get the headers
+        headers = self._messages.get(userId=user_id, id=1, format=message_format).headers
 
-        max_num_threads = 12  # empirically chosen, prevents throttling
-        target_msgs_per_thread = 10  # empirically chosen
-        num_threads = min(math.ceil(len(message_refs) / target_msgs_per_thread), max_num_threads)
-        batch_size = math.ceil(len(message_refs) / num_threads)
-        message_lists = [None] * num_threads
+        # add the authorization header
+        headers["Authorization"] = f"Bearer {self.creds.access_token}"
 
-        def thread_download_batch(thread_num):
-            gmail = Gmail(_creds=self.creds)
+        responses = self.fetch_all_messages(user_id, message_refs, headers, message_format)
 
-            start = thread_num * batch_size
-            end = min(len(message_refs), (thread_num + 1) * batch_size)
-            message_lists[thread_num] = [
-                gmail._build_message_from_ref(user_id, message_refs[i], attachments) for i in range(start, end)
-            ]
+        message_refs = [response.json() for response in responses]
 
-            gmail.service.close()
+        messages = [
+            self._build_message_from_ref(user_id, message, attachment_format, message_format=message_format)
+            for message in message_refs
+        ]
 
-        threads = [threading.Thread(target=thread_download_batch, args=(i,)) for i in range(num_threads)]
+        return messages
 
-        for t in threads:
-            t.start()
-
-        for t in threads:
-            t.join()
-
-        return functools.reduce(operator.iadd, message_lists, [])
-
-    def _build_message_from_ref(self, user_id: str, message_ref: dict, attachments: str = "reference") -> Message:
+    def _create_update_labels(
+        self,
+        to_add: Optional[Union[list[Label], list[str]]] = None,
+        to_remove: Optional[Union[list[Label], list[str]]] = None,
+    ) -> dict:
         """
-        Creates a Message object from a reference.
+        Creates an object for updating message label.
+
+        Args:
+            to_add: A list of labels to add.
+            to_remove: A list of labels to remove.
+
+        Returns:
+            The modify labels object to pass to the Gmail API.
+
+        """
+
+        to_add = to_add or []
+        to_remove = to_remove or []
+
+        return {
+            "addLabelIds": [lbl.id if isinstance(lbl, Label) else lbl for lbl in to_add],
+            "removeLabelIds": [lbl.id if isinstance(lbl, Label) else lbl for lbl in to_remove],
+        }
+
+    def mark_messages_as_read(self, messages: list[Message]):
+        """
+        Marks messages as read.
+
+        Args:
+            messages: The messages to mark as read.
+
+        Raises:
+            googleapiclient.errors.HttpError: There was an error executing the
+                HTTP request.
+
+        """
+
+        body = self._create_update_labels([], [label.UNREAD])
+
+        # build a fake message to get the headers
+        headers = self._messages.modify(userId="me", id=1, body=body).headers
+        headers["Authorization"] = f"Bearer {self.creds.access_token}"
+
+        responses = self.update_all_messages("me", messages, headers, body)
+
+        return responses
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(max=4),
+        after=after_log(LOGGER, logging.DEBUG),
+        before=before_log(LOGGER, logging.DEBUG),
+        before_sleep=before_sleep_log(LOGGER, logging.INFO),
+    )
+    def update_message(
+        self,
+        client: httpx.Client,
+        headers: dict[str, str],
+        user_id: str,
+        message_id: str,
+        body: dict,
+    ):
+        url = MODIFY_MSG_URL_TEMPLATE.format(user_id=user_id, message_id=message_id)
+        response = client.post(url, headers=headers, json=body)
+        response.raise_for_status()
+
+        return response
+
+    def update_all_messages(self, user_id: str, message_refs: list[dict], headers: dict, body: dict):
+        with httpx.Client() as client, ThreadPoolExecutor() as pool:
+            tasks = [
+                pool.submit(self.update_message, client, headers, user_id, message.id, body) for message in message_refs
+            ]
+            responses = [task.result() for task in tasks]
+
+        return responses
+
+    def _get_and_build_message(
+        self,
+        user_id: str,
+        message_id: str,
+        message_format: MESSAGE_FORMAT = "full",
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+    ) -> Message:
+        """
+        Retrieves and builds a message from the Gmail API.
 
         Args:
             user_id: The username of the account the message belongs to.
-            message_ref: The message reference object returned from the Gmail
-                API.
-            attachments: Accepted values are 'ignore' which completely ignores
+            message_id: The ID of the message to retrieve.
+            message_format: The format of the message to retrieve. Accepted
+                values are 'minimal', 'full', and 'metadata'. Default 'full'.
+            attachment_format: Accepted values are 'ignore' which completely ignores
                 all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -677,73 +922,241 @@ class Gmail:
 
         """
 
-        message = self.service.users().messages().get(userId=user_id, id=message_ref["id"]).execute()
+        message = self._messages.get(userId=user_id, id=message_id, format=message_format).execute()
+        return self._build_message_from_ref(user_id, message, attachment_format, message_format=message_format)
+
+    def _build_message_from_ref(
+        self,
+        user_id: str,
+        message: Message,
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+        message_format: MESSAGE_FORMAT = "full",
+    ) -> Message:
+        """
+        Creates a Message object from a reference.
+
+        Args:
+            user_id: The username of the account the message belongs to.
+            message_ref: The message reference object returned from the Gmail API.
+            attachment_format: Accepted values are 'ignore' which completely ignores
+                all attachments, 'reference' which includes attachment
+                information but does not download the data, and 'download' which
+                downloads the attachment data to store locally. Default
+                'reference'.
+
+        Returns:
+            The Message object.
+
+        Raises:
+            googleapiclient.errors.HttpError: There was an error executing the
+                HTTP request.
+
+        """
+
+        if message_format not in ["minimal", "full", "metadata"]:
+            raise ValueError("Invalid message format. Must be 'minimal', 'full', or 'metadata'.")
+
+        if message_format == "full":
+            built_msg = self._build_message_from_full_ref(user_id, message, attachment_format)
+
+        elif message_format == "metadata":
+            built_msg = self._build_message_from_metadata_ref(user_id, message)
+
+        elif message_format == "minimal":
+            built_msg = self._build_message_from_minimal_ref(user_id, message)
+
+        else:
+            raise ValueError("Invalid message format. Must be 'minimal', 'full', or 'metadata'.")
+
+        return built_msg
+
+    def _build_message_from_metadata_ref(self, user_id: str, message: Message) -> Message:
+        """
+        Creates a Message object from a reference.
+
+        Args:
+            user_id: The username of the account the message belongs to.
+            message_ref: The message reference object returned from the Gmail API.
+            attachment_format: Accepted values are 'ignore' which completely ignores
+                all attachments, 'reference' which includes attachment
+                information but does not download the data, and 'download' which
+                downloads the attachment data to store locally. Default
+                'reference'.
+
+        Returns:
+            The Message object.
+
+        Raises:
+            googleapiclient.errors.HttpError: There was an error executing the
+                HTTP request.
+
+        """
 
         msg_id = message["id"]
         thread_id = message["threadId"]
         label_ids = []
         if "labelIds" in message:
-            user_labels = {x.id: x for x in self.list_labels(user_id=user_id)}
-            label_ids = [user_labels[x] for x in message["labelIds"]]
+            label_ids = [self.labels[x] for x in message["labelIds"]]
+
         snippet = html.unescape(message["snippet"])
 
         payload = message["payload"]
         headers = payload["headers"]
 
-        # Get header fields (date, from, to, subject)
-        date = ""
-        sender = ""
-        recipient = ""
-        subject = ""
-        msg_hdrs = {}
-        cc = []
-        bcc = []
-        for hdr in headers:
-            if hdr["name"].lower() == "date":
-                try:
-                    date = str(parser.parse(hdr["value"]).astimezone())
-                except Exception:
-                    date = hdr["value"]
-            elif hdr["name"].lower() == "from":
-                sender = hdr["value"]
-            elif hdr["name"].lower() == "to":
-                recipient = hdr["value"]
-            elif hdr["name"].lower() == "subject":
-                subject = hdr["value"]
-            elif hdr["name"].lower() == "cc":
-                cc = hdr["value"].split(", ")
-            elif hdr["name"].lower() == "bcc":
-                bcc = hdr["value"].split(", ")
+        msg_hdrs = {hdr["name"]: hdr["value"] for hdr in headers}
 
-            msg_hdrs[hdr["name"]] = hdr["value"]
+        sender = msg_hdrs.get("From", "")
+        recipient = msg_hdrs.get("To", "")
+        subject = msg_hdrs.get("Subject", "")
+        cc = msg_hdrs.get("Cc", "").split(", ")
+        bcc = msg_hdrs.get("Bcc", "").split(", ")
+        date = msg_hdrs.get("Date", "")
 
-        parts = self._evaluate_message_payload(payload, user_id, message_ref["id"], attachments)
+        with contextlib.suppress(Exception):
+            date = str(parser.parse(date).astimezone())
+
+        return Message(
+            service=self.service,
+            creds=self.creds,
+            user_id=user_id,
+            msg_id=msg_id,
+            thread_id=thread_id,
+            recipient=recipient,
+            sender=sender,
+            subject=subject,
+            date=date,
+            snippet=snippet,
+            plain=None,
+            html=None,
+            label_ids=label_ids,
+            attachments=[],
+            headers=msg_hdrs,
+            cc=cc,
+            bcc=bcc,
+        )
+
+    def _build_message_from_minimal_ref(self, user_id: str, message: Message) -> Message:
+        """
+        Creates a Message object from a reference.
+
+        Args:
+            user_id: The username of the account the message belongs to.
+            message: The message reference object returned from the Gmail API.
+            attachment_format: Accepted values are 'ignore' which completely ignores
+                all attachments, 'reference' which includes attachment
+                information but does not download the data, and 'download' which
+                downloads the attachment data to store locally. Default
+                'reference'.
+
+        Returns:
+            The Message object.
+
+        Raises:
+            googleapiclient.errors.HttpError: There was an error executing the
+                HTTP request.
+
+        """
+
+        msg_id = message["id"]
+        thread_id = message["threadId"]
+        label_ids = []
+        if "labelIds" in message:
+            label_ids = [self.labels[x] for x in message["labelIds"]]
+
+        snippet = html.unescape(message["snippet"])
+
+        date_epoch = message.get("internalDate")
+        dtme = datetime.fromtimestamp(int(date_epoch) / 1000)  # noqa
+        dtme_str = str(dtme.astimezone())
+
+        return Message(
+            service=self.service,
+            creds=self.creds,
+            user_id=user_id,
+            msg_id=msg_id,
+            thread_id=thread_id,
+            recipient="",
+            sender="",
+            subject="",
+            date=dtme_str,
+            snippet=snippet,
+            label_ids=label_ids,
+        )
+
+    def _build_message_from_full_ref(
+        self,
+        user_id: str,
+        message: Message,
+        attachment_format: ATTACHMENT_FORMAT = "reference",
+    ) -> Message:
+        """
+        Creates a Message object from a reference.
+
+        Args:
+            user_id: The username of the account the message belongs to.
+            message: The message reference object returned from the Gmail API.
+            attachment_format: Accepted values are 'ignore' which completely ignores
+                all attachments, 'reference' which includes attachment
+                information but does not download the data, and 'download' which
+                downloads the attachment data to store locally. Default
+                'reference'.
+
+        Returns:
+            The Message object.
+
+        Raises:
+            googleapiclient.errors.HttpError: There was an error executing the
+                HTTP request.
+
+        """
+
+        msg_id = message["id"]
+        thread_id = message["threadId"]
+        label_ids = []
+        if "labelIds" in message:
+            label_ids = [self.labels[x] for x in message["labelIds"]]
+
+        snippet = html.unescape(message["snippet"])
+
+        payload = message["payload"]
+        headers = payload["headers"]
+
+        msg_hdrs = {hdr["name"]: hdr["value"] for hdr in headers}
+
+        sender = msg_hdrs.get("From", "")
+        recipient = msg_hdrs.get("To", "")
+        subject = msg_hdrs.get("Subject", "")
+        cc = msg_hdrs.get("Cc", "").split(", ")
+        bcc = msg_hdrs.get("Bcc", "").split(", ")
+        date = msg_hdrs.get("Date", "")
+
+        with contextlib.suppress(Exception):
+            date = str(parser.parse(date).astimezone())
+
+        parts = self._evaluate_message_payload(payload, user_id, msg_id, attachment_format)
 
         plain_msg = None
         html_msg = None
         attms = []
-        for part in parts:
-            if part["part_type"] == "plain":
-                if plain_msg is None:
-                    plain_msg = part["body"]
-                else:
-                    plain_msg += "\n" + part["body"]
-            elif part["part_type"] == "html":
-                if html_msg is None:
-                    html_msg = part["body"]
-                else:
-                    html_msg += "<br/>" + part["body"]
-            elif part["part_type"] == "attachment":
-                attm = Attachment(
-                    self.service,
-                    user_id,
-                    msg_id,
-                    part["attachment_id"],
-                    part["filename"],
-                    part["filetype"],
-                    part["data"],
-                )
-                attms.append(attm)
+
+        plain_msgs = [part["body"] for part in parts if part["part_type"] == "plain"]
+        html_msgs = [part["body"] for part in parts if part["part_type"] == "html"]
+        raw_attachments = [part for part in parts if part["part_type"] == "attachment"]
+
+        plain_msg = "\n".join(plain_msgs)
+        html_msg = "<br/>".join(html_msgs)
+
+        for part in raw_attachments:
+            attm = Attachment(
+                self.service,
+                user_id,
+                msg_id,
+                part["attachment_id"],
+                part["filename"],
+                part["filetype"],
+                part["data"],
+            )
+            attms.append(attm)
 
         return Message(
             self.service,
@@ -766,7 +1179,11 @@ class Gmail:
         )
 
     def _evaluate_message_payload(
-        self, payload: dict, user_id: str, msg_id: str, attachments: str = "reference"
+        self,
+        payload: dict,
+        user_id: str,
+        msg_id: str,
+        attachment_format: ATTACHMENT_FORMAT = "reference",
     ) -> list[dict]:
         """
         Recursively evaluates a message payload.
@@ -775,7 +1192,7 @@ class Gmail:
             payload: The message payload object (response from Gmail API).
             user_id: The current account address (default 'me').
             msg_id: The id of the message.
-            attachments: Accepted values are 'ignore' which completely ignores
+            attachment_format: Accepted values are 'ignore' which completely ignores
                 all attachments, 'reference' which includes attachment
                 information but does not download the data, and 'download' which
                 downloads the attachment data to store locally. Default
@@ -791,7 +1208,7 @@ class Gmail:
         """
 
         if "attachmentId" in payload["body"]:  # if it's an attachment
-            if attachments == "ignore":
+            if attachment_format == "ignore":
                 return []
 
             att_id = payload["body"]["attachmentId"]
@@ -807,10 +1224,10 @@ class Gmail:
                 "data": None,
             }
 
-            if attachments == "reference":
+            if attachment_format == "reference":
                 return [obj]
 
-            # attachments == 'download'
+            # attachment_format == 'download'
             if "data" in payload["body"]:
                 data = payload["body"]["data"]
             else:
@@ -843,7 +1260,7 @@ class Gmail:
             ret = []
             if "parts" in payload:
                 for part in payload["parts"]:
-                    ret.extend(self._evaluate_message_payload(part, user_id, msg_id, attachments))
+                    ret.extend(self._evaluate_message_payload(part, user_id, msg_id, attachment_format))
             return ret
 
         return []
