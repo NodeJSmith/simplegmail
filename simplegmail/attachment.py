@@ -104,7 +104,7 @@ class Attachment:
 
         if not overwrite and Path(filepath).exists():
             raise FileExistsError(
-                f"Cannot overwrite file '{filepath}'. Use overwrite=True if " f"you would like to overwrite the file."
+                f"Cannot overwrite file '{filepath}'. Use overwrite=True if you would like to overwrite the file."
             )
 
         with open(filepath, "wb") as f:
